@@ -29,6 +29,7 @@ public class playerAnimation : MonoBehaviour
         _animator.SetBool(FallHash, !_movement.IsGrounded);
     }
 
+    public void SetGrounded(bool isGrounded) => _animator.SetBool(IsGroundedHash, isGrounded);
     /// <summary>Call when horizontal movement starts or stops.</summary>
     public void SetMoving(bool isMoving) => _animator.SetBool(IsMovingHash, isMoving);
 

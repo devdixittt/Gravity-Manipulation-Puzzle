@@ -1,3 +1,4 @@
+﻿using System.Collections;
 using UnityEngine;
 
 /// <summary>
@@ -6,121 +7,206 @@ using UnityEngine;
 /// </summary>
 public class GravityManipulator : MonoBehaviour
 {
-    [Header("Gravity Settings")]
+    [Header("Gravity")]
     [SerializeField] private float gravityStrength = 20f;
-    [SerializeField] private float gravityTransitionSpeed = 5f;
+
+    [Header("Surface Snap")]
+    [SerializeField] private float raycastLength = 50f;
+    [SerializeField] private float skinOffset = 0.1f;
+    [SerializeField] private LayerMask surfaceLayer;
+
+    [Header("Transition")]
+    [SerializeField] private float transitionDuration = 0.4f;
 
     [Header("Hologram")]
-    [SerializeField] private GameObject hologramPrefab;   // Arrow/ghost prefab from base project
-    [SerializeField] private float hologramDistance = 2f;
+    [SerializeField] private GameObject hologramPrefab;
 
-    // Public so PlayerMovement can read it
+    // ── Public State ──────────────────────────────────────────────────────────
     public Vector3 GravityDirection { get; private set; } = Vector3.down;
+    public Vector3 Up => -GravityDirection;
+    public bool IsTransitioning { get; private set; } = false;
+    public float VerticalVelocity { get; set; } = 0f;
 
-    private Vector3 _pendingGravityDir = Vector3.down;   // Direction chosen but not yet confirmed
-    private Vector3 _currentGravityDir = Vector3.down;
-    private GameObject _hologramInstance;
-    private bool _hologramVisible = false;
+    // ── Private ───────────────────────────────────────────────────────────────
+    private Vector3 _pendingDirection = Vector3.down;
+    private CharacterController _cc;
+    private GameObject _hologram;
 
-    // All 6 possible gravity directions
-    private readonly Vector3[] _gravityOptions =
+    private void Awake()
     {
-        Vector3.down,
-        Vector3.up,
-        Vector3.left,
-        Vector3.right,
-        Vector3.forward,
-        Vector3.back
-    };
+        _cc = GetComponent<CharacterController>();
+    }
 
     private void Start()
     {
         if (hologramPrefab != null)
         {
-            _hologramInstance = Instantiate(hologramPrefab, transform.position, Quaternion.identity);
-            _hologramInstance.SetActive(false);
+            _hologram = Instantiate(hologramPrefab);
+            _hologram.SetActive(false);
         }
     }
 
     private void Update()
     {
         if (GameManager.Instance != null && !GameManager.Instance.IsGameActive) return;
+        if (IsTransitioning) return;
 
-        HandleDirectionInput();
-        HandleConfirmInput();
-        SmoothGravity();
+        HandleInput();
     }
 
-    /// <summary>Arrow keys cycle through gravity directions and show the hologram.</summary>
-    private void HandleDirectionInput()
+    // ── Input ─────────────────────────────────────────────────────────────────
+
+    private void HandleInput()
     {
-        Vector3 newDir = _pendingGravityDir;
+        Vector3 newDir = _pendingDirection;
 
         if (Input.GetKeyDown(KeyCode.UpArrow)) newDir = Vector3.forward;
         else if (Input.GetKeyDown(KeyCode.DownArrow)) newDir = Vector3.back;
         else if (Input.GetKeyDown(KeyCode.LeftArrow)) newDir = Vector3.left;
         else if (Input.GetKeyDown(KeyCode.RightArrow)) newDir = Vector3.right;
-
-        // Additional up/down gravity with Page keys (optional bonus)
-        if (Input.GetKeyDown(KeyCode.PageUp)) newDir = Vector3.up;
+        else if (Input.GetKeyDown(KeyCode.PageUp)) newDir = Vector3.up;
         else if (Input.GetKeyDown(KeyCode.PageDown)) newDir = Vector3.down;
 
-        bool arrowPressed = Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.DownArrow) ||
-                            Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow) ||
-                            Input.GetKey(KeyCode.PageUp) || Input.GetKey(KeyCode.PageDown);
-
-        if (newDir != _pendingGravityDir)
+        if (newDir != _pendingDirection)
         {
-            _pendingGravityDir = newDir;
-            UpdateHologram();
+            _pendingDirection = newDir;
+            ShowHologram();
         }
 
-        // Hide hologram when no arrow key is held
-        if (!arrowPressed && _hologramVisible)
-            SetHologramVisible(false);
-        else if (arrowPressed && !_hologramVisible)
-            SetHologramVisible(true);
-    }
+        bool anyKey = Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.DownArrow) ||
+                      Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow) ||
+                      Input.GetKey(KeyCode.PageUp) || Input.GetKey(KeyCode.PageDown);
 
-    /// <summary>Enter confirms and applies the selected gravity direction.</summary>
-    private void HandleConfirmInput()
-    {
+        if (!anyKey) HideHologram();
+
         if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
         {
-            _currentGravityDir = _pendingGravityDir;
-            Debug.Log($"[GravityManipulator] Gravity set to: {_currentGravityDir}");
-            SetHologramVisible(false);
+            if (_pendingDirection == GravityDirection) return;
+            HideHologram();
+            StartCoroutine(DoGravityTransition(_pendingDirection));
         }
     }
 
-    /// <summary>Smoothly interpolates GravityDirection toward the confirmed direction.</summary>
-    private void SmoothGravity()
+    // ── Gravity Transition ────────────────────────────────────────────────────
+
+    private IEnumerator DoGravityTransition(Vector3 newGravDir)
     {
-        GravityDirection = Vector3.Slerp(GravityDirection, _currentGravityDir,
-                                         gravityTransitionSpeed * Time.deltaTime).normalized;
+        IsTransitioning = true;
+        VerticalVelocity = 0f;
+
+        // ── 1. Find the surface in new gravity direction ───────────────────
+        bool hit = FindSurface(newGravDir, out Vector3 surfacePoint,
+                                          out Vector3 surfaceNormal);
+
+        if (!hit)
+        {
+            Debug.LogWarning("[Gravity] No surface found in direction: " + newGravDir);
+            IsTransitioning = false;
+            yield break;
+        }
+
+        // ── 2. Calculate where player should stand ────────────────────────
+        // Place player so feet are on surface with a small skin gap
+        float halfHeight = _cc.height / 2f + skinOffset;
+        Vector3 targetPos = surfacePoint + (-newGravDir) * halfHeight;
+
+        // ── 3. Calculate player's new rotation ───────────────────────────
+        // New up = opposite of gravity
+        // Preserve forward direction projected onto new up plane
+        Vector3 newUp = -newGravDir;
+        Vector3 projForward = Vector3.ProjectOnPlane(transform.forward, newUp);
+
+        if (projForward.sqrMagnitude < 0.001f)
+            projForward = Vector3.ProjectOnPlane(transform.right, newUp);
+
+        Quaternion targetRot = Quaternion.LookRotation(projForward.normalized, newUp);
+
+        // ── 4. Smoothly move + rotate player ─────────────────────────────
+        Vector3 startPos = transform.position;
+        Quaternion startRot = transform.rotation;
+        float elapsed = 0f;
+
+        _cc.enabled = false;
+
+        while (elapsed < transitionDuration)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.SmoothStep(0f, 1f, elapsed / transitionDuration);
+
+            transform.position = Vector3.Lerp(startPos, targetPos, t);
+            transform.rotation = Quaternion.Slerp(startRot, targetRot, t);
+
+            yield return null;
+        }
+
+        // Snap to exact final values
+        transform.position = targetPos;
+        transform.rotation = targetRot;
+
+        _cc.enabled = true;
+        GravityDirection = newGravDir;
+        VerticalVelocity = 0f;
+        IsTransitioning = false;
     }
 
-    /// <summary>Positions and orients the hologram to preview the chosen gravity direction.</summary>
-    private void UpdateHologram()
+    // ── Surface Detection ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Casts a ray from the player's center in the new gravity direction.
+    /// Returns the hit point and normal of the surface found.
+    private bool FindSurface(Vector3 gravDir, out Vector3 point, out Vector3 normal)
     {
-        if (_hologramInstance == null) return;
+        point = Vector3.zero;
+        normal = Vector3.up;
 
-        Vector3 offset = _pendingGravityDir * hologramDistance;
-        _hologramInstance.transform.position = transform.position + offset;
+        Ray ray = new Ray(transform.position, gravDir);
 
-        // Point the hologram arrow along the pending gravity direction
-        if (_pendingGravityDir != Vector3.zero)
-            _hologramInstance.transform.rotation =
-                Quaternion.LookRotation(_pendingGravityDir, Vector3.up);
+        if (Physics.Raycast(ray, out RaycastHit hit, raycastLength, surfaceLayer))
+        {
+            point = hit.point;
+            normal = hit.normal;
+            return true;
+        }
+
+        // Wider fallback using SphereCast
+        if (Physics.SphereCast(ray, 0.5f, out RaycastHit hit2, raycastLength, surfaceLayer))
+        {
+            point = hit2.point;
+            normal = hit2.normal;
+            return true;
+        }
+
+        return false;
     }
 
-    private void SetHologramVisible(bool visible)
+    // ── Hologram ──────────────────────────────────────────────────────────────
+
+    private void ShowHologram()
     {
-        _hologramVisible = visible;
-        if (_hologramInstance != null)
-            _hologramInstance.SetActive(visible);
+        if (_hologram == null) return;
+
+        if (FindSurface(_pendingDirection, out Vector3 point, out Vector3 normal))
+        {
+            float halfHeight = _cc.height / 2f + skinOffset;
+            Vector3 newUp = -_pendingDirection;
+            Vector3 pos = point + newUp * halfHeight;
+            Vector3 projFwd = Vector3.ProjectOnPlane(transform.forward, newUp);
+
+            if (projFwd.sqrMagnitude < 0.001f)
+                projFwd = Vector3.ProjectOnPlane(Vector3.forward, newUp);
+
+            _hologram.transform.position = pos;
+            _hologram.transform.rotation = Quaternion.LookRotation(
+                                               projFwd.normalized, newUp);
+            _hologram.SetActive(true);
+        }
     }
 
-    /// <summary>Returns the scaled gravity vector for external use.</summary>
+    private void HideHologram()
+    {
+        if (_hologram != null)
+            _hologram.SetActive(false);
+    }
+
     public Vector3 GetGravityVector() => GravityDirection * gravityStrength;
 }

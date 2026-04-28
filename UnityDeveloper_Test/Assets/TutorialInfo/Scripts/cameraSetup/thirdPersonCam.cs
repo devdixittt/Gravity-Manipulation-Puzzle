@@ -7,30 +7,30 @@ using UnityEngine;
 public class ThirdPersonCamera : MonoBehaviour
 {
     [Header("Target")]
-    [SerializeField] private Transform target;          // Drag the Player here
+    [SerializeField] private Transform target;
 
-    [Header("Orbit Settings")]
-    [SerializeField] private float distance = 6f;
+    [Header("Camera Settings")]
+    [SerializeField] private float distance = 5f;
     [SerializeField] private float heightOffset = 2f;
-    [SerializeField] private float rotationSpeed = 3f;
+    [SerializeField] private float mouseSensitivity = 3f;
+    [SerializeField] private float minPitch = -20f;
+    [SerializeField] private float maxPitch = 60f;
+    [SerializeField] private float smoothSpeed = 10f;
+    [SerializeField] private float upVectorSpeed = 6f;
 
-    [Header("Clamp")]
-    [SerializeField] private float minVerticalAngle = -20f;
-    [SerializeField] private float maxVerticalAngle = 60f;
+    private float _yaw;
+    private float _pitch = 20f;
+    private Vector3 _smoothedUp = Vector3.up;
 
-    [Header("Collision")]
-    [SerializeField] private LayerMask collisionMask;
-    [SerializeField] private float collisionRadius = 0.3f;
+    private GravityManipulator _grav;
 
-    private float _yaw;    // Horizontal orbit angle
-    private float _pitch;  // Vertical orbit angle
-
-    private GravityManipulator _gravManipulator;
+    // Exposed so PlayerMovement can read camera facing direction
+    public Vector3 SmoothedUp => _smoothedUp;
 
     private void Start()
     {
-        if (target != null)
-            _gravManipulator = target.GetComponent<GravityManipulator>();
+        _yaw = target != null ? target.eulerAngles.y : 0f;
+        _grav = target != null ? target.GetComponent<GravityManipulator>() : null;
 
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
@@ -40,35 +40,25 @@ public class ThirdPersonCamera : MonoBehaviour
     {
         if (target == null) return;
 
+        // Smoothly track gravity up vector
+        Vector3 desiredUp = _grav != null ? -_grav.GravityDirection : Vector3.up;
+        _smoothedUp = Vector3.Slerp(_smoothedUp, desiredUp,
+                                    upVectorSpeed * Time.deltaTime).normalized;
+
         // Mouse input
-        _yaw += Input.GetAxis("Mouse X") * rotationSpeed;
-        _pitch -= Input.GetAxis("Mouse Y") * rotationSpeed;
-        _pitch = Mathf.Clamp(_pitch, minVerticalAngle, maxVerticalAngle);
+        _yaw += Input.GetAxis("Mouse X") * mouseSensitivity;
+        _pitch -= Input.GetAxis("Mouse Y") * mouseSensitivity;
+        _pitch = Mathf.Clamp(_pitch, minPitch, maxPitch);
 
-        // Determine up-vector from current gravity
-        Vector3 gravDir = _gravManipulator != null
-            ? _gravManipulator.GravityDirection
-            : Vector3.down;
-        Vector3 up = -gravDir;
+        // Position camera behind and above player
+        Quaternion rotation = Quaternion.Euler(_pitch, _yaw, 0f);
+        Vector3 offset = rotation * new Vector3(0f, 0f, -distance);
+        Vector3 pivot = target.position + _smoothedUp * heightOffset;
 
-        // Build camera rotation
-        Quaternion rotation = Quaternion.AngleAxis(_yaw, up) *
-                              Quaternion.AngleAxis(_pitch, Vector3.right);
-
-        Vector3 pivotPos = target.position + up * heightOffset;
-        Vector3 desiredPos = pivotPos - rotation * Vector3.forward * distance;
-
-        // Simple collision check
-        Vector3 finalPos = desiredPos;
-        if (Physics.SphereCast(pivotPos, collisionRadius,
-                               (desiredPos - pivotPos).normalized,
-                               out RaycastHit hit,
-                               distance, collisionMask))
-        {
-            finalPos = pivotPos + (desiredPos - pivotPos).normalized * (hit.distance - collisionRadius);
-        }
-
-        transform.position = finalPos;
-        transform.LookAt(pivotPos, up);
+        transform.position = Vector3.Lerp(transform.position,
+                                          pivot + offset,
+                                          smoothSpeed * Time.deltaTime);
+        // Look at player using correct up vector
+        transform.LookAt(pivot, _smoothedUp);
     }
 }

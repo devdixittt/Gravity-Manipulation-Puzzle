@@ -1,151 +1,104 @@
-using UnityEngine;
+﻿using UnityEngine;
 
-/// <summary>
-/// Handles WASD movement and Space jump relative to the current gravity direction.
-/// Works with CharacterController; gravity is applied manually to support custom gravity axes.
 /// </summary>
 [RequireComponent(typeof(CharacterController))]
 public class InputController : MonoBehaviour
 {
-    [Header("Movement Settings")]
+    [Header("Movement")]
     [SerializeField] private float moveSpeed = 6f;
     [SerializeField] private float jumpForce = 8f;
-    [SerializeField] private float gravityMultiplier = 2f;
+    [SerializeField] private float gravityMultiplier = 2.5f;
+    [SerializeField] private float rotationSpeed = 12f;
 
-    [Header("Ground Detection")]
-    [SerializeField] private float groundCheckDistance = 0.3f;
+    [Header("Ground Check")]
+    [SerializeField] private float groundCheckDistance = 0.2f;
     [SerializeField] private LayerMask groundLayer;
 
-    private CharacterController _controller;
-    private GravityManipulator _gravityManipulator;
-    private playerAnimation _animController;
+    private CharacterController _cc;
+    private GravityManipulator _grav;
+    private playerAnimation _anim;
+    private ThirdPersonCamera _cam;
 
-    private Vector3 _velocity;       // Current velocity (includes gravity component)
-    private bool _isGrounded;
-    private float _fallTimer;        // Tracks how long player has been airborne
-
-    [Header("Fall-Death Settings")]
-    [SerializeField] private float maxFallTime = 3f; // seconds of free-fall before game over
-
-    public bool IsGrounded => _isGrounded;
+    public bool IsGrounded { get; private set; }
 
     private void Awake()
     {
-        _controller = GetComponent<CharacterController>();
-       // _gravityManipulator = GetComponent<GravityManipulator>();
-        _animController = GetComponent<playerAnimation>();
+        _cc = GetComponent<CharacterController>();
+        _grav = GetComponent<GravityManipulator>();
+        _anim = GetComponent<playerAnimation>();
+        _cam = Camera.main?.GetComponent<ThirdPersonCamera>();
     }
 
     private void Update()
     {
         if (GameManager.Instance != null && !GameManager.Instance.IsGameActive) return;
+        if (_grav.IsTransitioning) return;
 
         CheckGrounded();
-        HandleMovement();
-        //HandleJump();
+        Move();
         ApplyGravity();
-        TrackFreeFall();
     }
 
-    /// <summary>Uses a sphere cast along the negative gravity axis to detect the ground.</summary>
+    // ── Ground Check ──────────────────────────────────────────────────────────
     private void CheckGrounded()
     {
-        Vector3 gravDir = _gravityManipulator != null
-            ? _gravityManipulator.GravityDirection
-            : Vector3.down;
+        // Feet position = center shifted along gravity direction by half height
+        Vector3 feet = transform.position
+                       + _grav.GravityDirection * (_cc.height * 0.5f - _cc.radius);
 
-        Vector3 origin = transform.position - gravDir * (_controller.height * 0.5f - _controller.radius);
-        _isGrounded = Physics.CheckSphere(origin, _controller.radius + groundCheckDistance, groundLayer);
+        IsGrounded = Physics.CheckSphere(feet,
+                                         _cc.radius + groundCheckDistance,
+                                         groundLayer);
 
-        // Reset vertical velocity component when grounded
-        if (_isGrounded)
-        {
-            Vector3 gravAxis = gravDir;
-            float downwardSpeed = Vector3.Dot(_velocity, gravAxis);
-            if (downwardSpeed > 0f)
-                _velocity -= gravAxis * downwardSpeed; // cancel only the gravity-axis velocity
-        }
+        if (IsGrounded && _grav.VerticalVelocity > 0f)
+            _grav.VerticalVelocity = 0f;
+
+        _anim?.SetGrounded(IsGrounded);
     }
 
-    /// <summary>Moves the character based on WASD input, relative to camera and gravity plane.</summary>
-    private void HandleMovement()
+    // ── Movement ──────────────────────────────────────────────────────────────
+    private void Move()
     {
-        float h = Input.GetAxisRaw("Horizontal"); // A/D
-        float v = Input.GetAxisRaw("Vertical");   // W/S
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = Input.GetAxisRaw("Vertical");
 
-        // Build movement axes perpendicular to gravity
-        Vector3 gravDir = _gravityManipulator != null
-            ? _gravityManipulator.GravityDirection
-            : Vector3.down;
+        // Project camera axes onto the gravity plane so movement
+        // always feels correct regardless of which surface player is on
+        Vector3 camForward = _cam != null ? _cam.transform.forward : transform.forward;
+        Vector3 camRight = _cam != null ? _cam.transform.right : transform.right;
 
-        Vector3 camForward = Camera.main.transform.forward;
-        Vector3 camRight = Camera.main.transform.right;
+        Vector3 flatForward = Vector3.ProjectOnPlane(camForward, _grav.Up).normalized;
+        Vector3 flatRight = Vector3.ProjectOnPlane(camRight, _grav.Up).normalized;
 
-        // Project camera directions onto the plane perpendicular to gravity
-        Vector3 forward = Vector3.ProjectOnPlane(camForward, -gravDir).normalized;
-        Vector3 right = Vector3.ProjectOnPlane(camRight, -gravDir).normalized;
+        Vector3 inputDir = (flatForward * v + flatRight * h).normalized;
+        bool hasInput = inputDir.sqrMagnitude > 0.01f;
 
-        Vector3 moveDir = (forward * v + right * h).normalized;
-        Vector3 moveVelocity = moveDir * moveSpeed;
+        // Combine movement + gravity into one Move call
+        Vector3 moveVelocity = hasInput ? inputDir * moveSpeed : Vector3.zero;
+        Vector3 gravVelocity = _grav.GravityDirection * _grav.VerticalVelocity;
 
-        // Preserve gravity-axis velocity, replace planar velocity
-        Vector3 gravComponent = Vector3.Project(_velocity, gravDir);
-        _velocity = moveVelocity + gravComponent;
-
-        _controller.Move(_velocity * Time.deltaTime);
+        _cc.Move((moveVelocity) * Time.deltaTime);
 
         // Rotate player to face movement direction
-        if (moveDir.sqrMagnitude > 0.01f)
+        if (hasInput)
         {
-            Quaternion targetRot = Quaternion.LookRotation(moveDir, -gravDir);
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, 15f * Time.deltaTime);
+            Quaternion targetRot = Quaternion.LookRotation(inputDir, _grav.Up);
+            transform.rotation = Quaternion.Slerp(transform.rotation,
+                                                     targetRot,
+                                                     rotationSpeed * Time.deltaTime);
         }
 
-        // Drive animations
-        _animController?.SetMoving(moveDir.sqrMagnitude > 0.01f);
+        _anim?.SetMoving(hasInput);
     }
 
-    /// <summary>Applies an impulse along the anti-gravity axis when Space is pressed.</summary>
-    /*private void HandleJump()
-    {
-        if (_isGrounded && Input.GetButtonDown("Jump"))
-        {
-            Vector3 gravDir = _gravityManipulator != null
-                ? _gravityManipulator.GravityDirection
-                : Vector3.down;
+    // ── Gravity ───────────────────────────────────────────────────────────────
 
-            // Remove existing velocity on gravity axis, then add jump impulse
-            _velocity -= Vector3.Project(_velocity, gravDir);
-            _velocity += -gravDir * jumpForce;
-
-            //_animController?.TriggerJump();
-        }
-    }*/
-
-    /// <summary>Continuously accelerates the player along the gravity direction.</summary>
     private void ApplyGravity()
     {
-        if (_isGrounded) return;
+        if (IsGrounded) return;
 
-        Vector3 gravDir = _gravityManipulator != null
-            ? _gravityManipulator.GravityDirection
-            : Vector3.down;
-
-        _velocity += gravDir * (Mathf.Abs(Physics.gravity.y) * gravityMultiplier * Time.deltaTime);
-    }
-
-    /// <summary>Tracks airborne time and triggers GameOver if the player is in free-fall too long.</summary>
-    private void TrackFreeFall()
-    {
-        if (!_isGrounded)
-        {
-            _fallTimer += Time.deltaTime;
-            if (_fallTimer >= maxFallTime)
-                GameManager.Instance?.TriggerGameOver("Free-fall detected!");
-        }
-        else
-        {
-            _fallTimer = 0f;
-        }
+        _grav.VerticalVelocity += Mathf.Abs(Physics.gravity.y)
+                                  * gravityMultiplier
+                                  * Time.deltaTime;
     }
 }

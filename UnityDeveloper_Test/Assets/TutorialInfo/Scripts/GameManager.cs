@@ -39,6 +39,7 @@ public class GameManager : MonoBehaviour
         Instance = this;
     }
 
+    [Obsolete]
     private void Start()
     {
         _timeRemaining = timeLimitSeconds;
